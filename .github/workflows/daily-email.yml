@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+  kimi_API_KEY: ${{ secrets.KIMI_API_KEY }}
   KIMI_MODEL: moonshotai/kimi-k2.5
   KIMI_API_URL: https://integrate.api.nvidia.com/v1/chat/completions
   EMAIL_TO: HZ-lu2007@outlook.com
