@@ -1,11 +1,11 @@
-# POLITICO 中文 RSS 生成器 📰➡️🇨🇳
+# 纽约客摘要邮件 生成器 📰➡️🇨🇳
 
 欢迎使用 POLITICO 中文 RSS 生成器！🎉 这是一个 Python 项目，它会自动抓取 POLITICO 的最新新闻，使用 Gemini API 将其翻译成简体中文，然后生成一个全新的 RSS Feed (`feed.xml`)。更酷的是，它还会将这个中文 RSS Feed 同步到您指定的 GitHub 仓库，方便您随时订阅和分享！
 
 ## ✨ 主要功能
 
-*   **自动新闻抓取**: 定期从 POLITICO RSS 源获取最新文章。
-*   **智能翻译**: 利用 Google Gemini API 将英文新闻内容高质量翻译为简体中文。
+*   **自动新闻抓取**: 定期从 纽约客 RSS 源获取最新文章。
+*   **智能翻译**: 利用 LLM 将英文新闻内容高质量翻译为简体中文。
 *   **RSS Feed 生成**: 将翻译后的新闻条目构建为标准的 RSS 2.0 Feed (`feed.xml`)。
 *   **GitHub 同步**: 自动将生成的 `feed.xml` 推送到您的 GitHub 仓库。
 *   **Web 服务**: 通过 Flask 提供一个简单的 Web 服务，可以直接访问生成的 RSS Feed。
