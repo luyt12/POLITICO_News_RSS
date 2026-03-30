@@ -155,9 +155,17 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) > 1:
-        date_arg = sys.argv[1]
-        if not date_arg.endswith('.md'):
-            date_arg = date_arg.replace('-', '')[:8]
-        send_daily_email(date_arg)
+        path_arg = sys.argv[1]
+        # 支持完整路径如 "translate/20260330.md" 或纯日期如 "20260330"
+        if path_arg.endswith('.md'):
+            # 提取文件名中的日期
+            import re
+            m = re.search(r'(\d{8})', path_arg)
+            if m:
+                send_daily_email(m.group(1))
+            else:
+                send_daily_email()
+        else:
+            send_daily_email(path_arg.replace('-', '')[:8])
     else:
         send_daily_email()
