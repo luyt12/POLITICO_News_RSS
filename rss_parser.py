@@ -1,6 +1,7 @@
 import feedparser
 import html2text
 import os
+import json
 from datetime import datetime
 
 # 配置项
@@ -9,13 +10,38 @@ RSS_FEEDS = [
     "https://rss.politico.com/congress.xml"
 ]
 OUTPUT_DIR = "dailynews" # 输出文件夹名称
+PROCESSED_URLS_FILE = "processed_urls.json"  # 已处理文章URL记录
+
+def load_processed_urls():
+    """加载已处理的文章URL列表"""
+    if os.path.exists(PROCESSED_URLS_FILE):
+        try:
+            with open(PROCESSED_URLS_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception as e:
+            print(f"警告: 无法加载已处理URL记录: {e}")
+    return set()
+
+def save_processed_urls(urls):
+    """保存已处理的文章URL列表"""
+    try:
+        with open(PROCESSED_URLS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(urls), f, ensure_ascii=False, indent=2)
+        print(f"已保存 {len(urls)} 个已处理URL到 {PROCESSED_URLS_FILE}")
+    except Exception as e:
+        print(f"警告: 无法保存已处理URL记录: {e}")
 
 def fetch_and_save_rss_news():
     """
     抓取RSS源，解析新闻条目，并按日期保存为Markdown文件。
+    使用 processed_urls.json 去重，避免重复处理相同文章。
     """
     # 确保输出目录存在
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # 加载已处理的URL
+    processed_urls = load_processed_urls()
+    print(f"已加载 {len(processed_urls)} 个已处理URL")
 
     # 初始化HTML到Markdown转换器
     html_converter = html2text.HTML2Text()
@@ -24,6 +50,7 @@ def fetch_and_save_rss_news():
     # 用于存储按日期分组的新闻条目
     # 结构: {"YYYYMMDD": ["markdown_formatted_news_item_1", "markdown_formatted_news_item_2"]}
     news_by_date = {}
+    new_urls = set()  # 本次新处理的文章URL
 
     print("开始处理RSS源...")
     for feed_url in RSS_FEEDS:
@@ -41,6 +68,11 @@ def fetch_and_save_rss_news():
         for entry in feed.entries:
             title = entry.get("title", "无标题")
             link = entry.get("link", "无链接")
+            
+            # 去重检查：跳过已处理的文章
+            if link in processed_urls:
+                print(f"跳过已处理文章: {title[:50]}...")
+                continue
             
             # 获取并解析发布日期
             published_time_struct = entry.get("published_parsed")
@@ -79,6 +111,10 @@ def fetch_and_save_rss_news():
             if date_str_for_filename not in news_by_date:
                 news_by_date[date_str_for_filename] = []
             news_by_date[date_str_for_filename].append(news_item_markdown)
+            
+            # 记录新处理的URL
+            new_urls.add(link)
+            processed_urls.add(link)
 
     print("\n开始写入新闻到Markdown文件...")
     # 将分组后的新闻写入对应的Markdown文件
@@ -86,14 +122,19 @@ def fetch_and_save_rss_news():
         filepath = os.path.join(OUTPUT_DIR, f"{date_str}.md")
         print(f"正在写入 {len(items_markdown_list)} 条新闻到: {filepath}")
         try:
-            # 使用 "w" 模式，每次运行脚本时会覆盖旧的每日文件，
-            # 以确保文件内容总是反映当前RSS源中该日期的所有新闻。
-            with open(filepath, "w", encoding="utf-8") as f:
+            # 使用 "a" 追加模式，保留之前的内容，避免覆盖
+            # 这样即使RSS源有延迟，也不会丢失之前抓取的文章
+            with open(filepath, "a", encoding="utf-8") as f:
                 for item_md in items_markdown_list:
                     f.write(item_md)
             print(f"成功写入到 {filepath}")
         except IOError as e:
             print(f"错误: 无法写入文件 {filepath}. 原因: {e}")
+    
+    # 保存已处理的URL
+    if new_urls:
+        save_processed_urls(processed_urls)
+        print(f"本次新处理 {len(new_urls)} 篇文章")
 
 def main():
     """主函数，用于被其他模块调用"""
