@@ -1,145 +1,173 @@
+"""
+POLITICO EU RSS Parser
+抓取 https://www.politico.eu/feed/ 并按日期保存为 Markdown。
+去重：通过 processed_urls.json 记录已发送的 URL。
+"""
 import feedparser
 import html2text
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+import pytz
 
 # 配置项
-RSS_FEEDS = [
-    "https://rss.politico.com/politics-news.xml",
-    "https://rss.politico.com/congress.xml"
-]
-OUTPUT_DIR = "dailynews" # 输出文件夹名称
-PROCESSED_URLS_FILE = "processed_urls.json"  # 已处理文章URL记录
+RSS_URL = "https://www.politico.eu/feed/"
+OUTPUT_DIR = "dailynews"      # 原始文章输出目录
+PROCESSED_FILE = "processed_urls.json"  # {"url": {"title": "...", "sent": bool, "date": "YYYY-MM-DD"}}
+MAX_DAILY = 10               # 每天最多处理10篇
 
-def load_processed_urls():
-    """加载已处理的文章URL列表"""
-    if os.path.exists(PROCESSED_URLS_FILE):
+# 欧洲时区（用于判断"今天"）
+TZ_EU = pytz.timezone("Europe/Brussels")
+
+
+def load_processed():
+    """加载已处理记录"""
+    if os.path.exists(PROCESSED_FILE):
         try:
-            with open(PROCESSED_URLS_FILE, 'r', encoding='utf-8') as f:
-                return set(json.load(f))
+            with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
         except Exception as e:
-            print(f"警告: 无法加载已处理URL记录: {e}")
-    return set()
+            print(f"警告: 无法加载 {PROCESSED_FILE}: {e}")
+    return {}
 
-def save_processed_urls(urls):
-    """保存已处理的文章URL列表"""
+
+def save_processed(data):
+    """保存已处理记录"""
+    with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"已保存 {len(data)} 条记录到 {PROCESSED_FILE}")
+
+
+def is_today_eu(dt, today_str):
+    """判断文章日期是否为今日（欧洲时间）"""
     try:
-        with open(PROCESSED_URLS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(urls), f, ensure_ascii=False, indent=2)
-        print(f"已保存 {len(urls)} 个已处理URL到 {PROCESSED_URLS_FILE}")
-    except Exception as e:
-        print(f"警告: 无法保存已处理URL记录: {e}")
+        eu_tz = pytz.timezone("Europe/Brussels")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        eu_dt = dt.astimezone(eu_tz)
+        return eu_dt.strftime("%Y-%m-%d") == today_str
+    except Exception:
+        return False
 
-def fetch_and_save_rss_news():
+
+def fetch_rss():
     """
-    抓取RSS源，解析新闻条目，并按日期保存为Markdown文件。
-    使用 processed_urls.json 去重，避免重复处理相同文章。
+    抓取 politico.eu RSS，按日期保存 Markdown。
+    仅保留今天（欧洲时间）的文章，且不超过 MAX_DAILY 篇。
+    去重：不重复抓取 processed_urls.json 中已存在的 URL。
     """
-    # 确保输出目录存在
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    processed = load_processed()
 
-    # 加载已处理的URL
-    processed_urls = load_processed_urls()
-    print(f"已加载 {len(processed_urls)} 个已处理URL")
+    print(f"正在抓取: {RSS_URL}")
+    feed = feedparser.parse(RSS_URL)
 
-    # 初始化HTML到Markdown转换器
-    html_converter = html2text.HTML2Text()
-    html_converter.body_width = 0  # 设置为0以避免自动换行，保持原始内容的换行
+    if feed.bozo:
+        print(f"警告: RSS 格式可能有问题. 错误: {feed.bozo_exception}")
 
-    # 用于存储按日期分组的新闻条目
-    # 结构: {"YYYYMMDD": ["markdown_formatted_news_item_1", "markdown_formatted_news_item_2"]}
-    news_by_date = {}
-    new_urls = set()  # 本次新处理的文章URL
+    if not feed.entries:
+        print("警告: RSS 条目为空")
+        return []
 
-    print("开始处理RSS源...")
-    for feed_url in RSS_FEEDS:
-        print(f"正在抓取和解析: {feed_url}")
-        
-        # 解析RSS源
-        feed = feedparser.parse(feed_url)
+    # 计算欧洲"今天"
+    now_eu = datetime.now(TZ_EU)
+    today_str = now_eu.strftime("%Y-%m-%d")
+    today_file = os.path.join(OUTPUT_DIR, today_str + ".md")
 
-        # 检查解析是否成功（bozo位通常表示格式不佳的源）
-        if feed.bozo:
-            print(f"警告: RSS源 '{feed_url}' 可能存在格式问题. "
-                  f"错误类型: {feed.bozo_exception.__class__.__name__}, "
-                  f"原因: {feed.bozo_exception}")
+    # 收集今日未处理的文章
+    candidates = []
+    for entry in feed.entries:
+        link = entry.get("link", "")
+        title = entry.get("title", "无标题")
 
-        for entry in feed.entries:
-            title = entry.get("title", "无标题")
-            link = entry.get("link", "无链接")
-            
-            # 去重检查：跳过已处理的文章
-            if link in processed_urls:
-                print(f"跳过已处理文章: {title[:50]}...")
-                continue
-            
-            # 获取并解析发布日期
-            published_time_struct = entry.get("published_parsed")
-            if not published_time_struct:
-                print(f"警告: 条目 '{title}' ({link}) 缺少发布日期，将跳过。")
-                continue
-            
-            try:
-                # time.struct_time -> datetime object -> "YYYYMMDD" string
-                dt_object = datetime(*published_time_struct[:6])
-                date_str_for_filename = dt_object.strftime("%Y%m%d")
-            except ValueError as e:
-                print(f"警告: 无法解析条目 '{title}' ({link}) 的发布日期 '{published_time_struct}', "
-                      f"错误: {e}，将跳过。")
-                continue
+        if not link:
+            continue
 
-            # 提取 <content:encoded> (首选) 或 summary (备选)
-            content_html = ""
-            if hasattr(entry, 'content') and entry.content:
-                # entry.content 是一个列表，通常包含一个字典，其 'value' 键对应 <content:encoded>
-                content_html = entry.content[0].get('value', '')
-            
-            if not content_html and hasattr(entry, 'summary'):
-                content_html = entry.summary
-            
-            if not content_html:
-                print(f"警告: 条目 '{title}' ({link}) 既无 <content:encoded> 内容也无 summary，内容将为空。")
-            
-            # 将HTML内容转换为Markdown
-            content_md = html_converter.handle(content_html) if content_html else "无内容"
+        # 去重：已处理过（含已发送）的跳过
+        if link in processed:
+            print(f"跳过已记录: {title[:50]}")
+            continue
 
-            # 格式化单个新闻条目的Markdown文本
-            news_item_markdown = f"标题：{title}\n链接：{link}\n\n{content_md.strip()}\n\n---\n"
-
-            # 按日期分组
-            if date_str_for_filename not in news_by_date:
-                news_by_date[date_str_for_filename] = []
-            news_by_date[date_str_for_filename].append(news_item_markdown)
-            
-            # 记录新处理的URL
-            new_urls.add(link)
-            processed_urls.add(link)
-
-    print("\n开始写入新闻到Markdown文件...")
-    # 将分组后的新闻写入对应的Markdown文件
-    for date_str, items_markdown_list in news_by_date.items():
-        filepath = os.path.join(OUTPUT_DIR, f"{date_str}.md")
-        print(f"正在写入 {len(items_markdown_list)} 条新闻到: {filepath}")
+        # 获取发布日期
+        pub_dt = None
         try:
-            # 使用 "a" 追加模式，保留之前的内容，避免覆盖
-            # 这样即使RSS源有延迟，也不会丢失之前抓取的文章
-            with open(filepath, "a", encoding="utf-8") as f:
-                for item_md in items_markdown_list:
-                    f.write(item_md)
-            print(f"成功写入到 {filepath}")
-        except IOError as e:
-            print(f"错误: 无法写入文件 {filepath}. 原因: {e}")
-    
-    # 保存已处理的URL
-    if new_urls:
-        save_processed_urls(processed_urls)
-        print(f"本次新处理 {len(new_urls)} 篇文章")
+            pub_struct = entry.get("published_parsed")
+            if pub_struct:
+                pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        # 筛选今日（欧洲时间）的文章
+        if pub_dt and not is_today_eu(pub_dt, today_str):
+            continue
+
+        candidates.append(entry)
+
+    print(f"今日（欧洲时间 {today_str}）新文章: {len(candidates)} 篇")
+
+    if not candidates:
+        print("今日无新文章，跳过写入")
+        return []
+
+    # 限制数量
+    selected = candidates[:MAX_DAILY]
+    print(f"选取前 {len(selected)} 篇")
+
+    html_converter = html2text.HTML2Text()
+    html_converter.body_width = 0
+
+    saved = []
+    for entry in selected:
+        title = entry.get("title", "无标题")
+        link = entry.get("link", "")
+
+        # 提取正文
+        content_html = ""
+        if hasattr(entry, "content") and entry.content:
+            content_html = entry.content[0].get("value", "")
+        if not content_html and hasattr(entry, "summary"):
+            content_html = entry.summary
+
+        content_md = html_converter.handle(content_html).strip() if content_html else "（无正文）"
+
+        # 写入 Markdown
+        item = f"## {title}\n\n链接：{link}\n\n{content_md}\n\n---\n\n"
+
+        mode = "a" if os.path.exists(today_file) else "w"
+        with open(today_file, mode, encoding="utf-8") as f:
+            f.write(item)
+
+        # 记录到 processed_urls.json
+        pub_str = ""
+        if pub_dt:
+            try:
+                pub_str = pub_dt.astimezone(TZ_EU).strftime("%Y-%m-%d")
+            except Exception:
+                pub_str = today_str
+
+        processed[link] = {"title": title, "sent": False, "date": pub_str or today_str}
+        saved.append(link)
+        print(f"  已保存: {title[:60]}")
+
+    # 更新 processed_urls.json
+    save_processed(processed)
+    print(f"本次新增 {len(saved)} 篇，文件: {today_file}")
+    return saved
+
+
+def mark_sent(urls):
+    """标记指定 URL 为已发送"""
+    processed = load_processed()
+    for url in urls:
+        if url in processed:
+            processed[url]["sent"] = True
+    save_processed(processed)
+
 
 def main():
-    """主函数，用于被其他模块调用"""
-    fetch_and_save_rss_news()
+    saved = fetch_rss()
+    print(f"\n完成: 抓取 {len(saved)} 篇新文章")
+
 
 if __name__ == "__main__":
     main()
-    print("\n所有RSS源处理完毕。")
