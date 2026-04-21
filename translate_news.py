@@ -1,3 +1,8 @@
+"""
+POLITICO EU News Translator
+Primary: Kimi K2.5 (summarize + translate + style)
+Fallback: Baidu AI Translation (translate only, on Kimi failure)
+"""
 import os
 import sys
 import glob
@@ -5,170 +10,191 @@ import logging
 import requests
 import time
 
-# --- 配置日志 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
-# --- 配置（直接从环境变量读取）---
 KIMI_API_KEY = os.getenv("kimi_API_KEY")
-KIMI_MODEL = os.getenv("KIMI_MODEL", "moonshotai/kimi-k2.5")
-KIMI_API_URL = os.getenv("KIMI_API_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
+KIMI_MODEL   = os.getenv("KIMI_MODEL", "moonshotai/kimi-k2.5")
+KIMI_API_URL = os.getenv("KIMI_API_URL",
+                          "https://integrate.api.nvidia.com/v1/chat/completions")
+BAIDU_API_KEY = os.getenv("BAIDU_API_KEY", "")
 
-INPUT_DIR = "dailynews"
+INPUT_DIR  = "dailynews"
 OUTPUT_DIR = "translate"
 
-# --- 翻译提示词 ---
-TRANSLATION_PROMPT = """你是一位专业的翻译者，擅长将 POLITICO 新闻，翻译为简体中文，请对我给出的内容进行翻译。请遵循以下要求：
+PROMPT = """你是一位专业的英语媒体编辑。请完成以下两个任务：
 
-# 翻译格式
-1. 使用Markdown格式输出
-2. 将所有英文内容进行翻译，包括：标题、正文等
-3. 输出时，完整保留原始内容中，所有无需翻译的内容，不要遗漏
-4. 每篇翻译报道的标题，使用Markdown二级标题(##)
-5. 在每篇翻译报道下，注明原文的链接网址，不要改动
+## Task 1: 提取要点
+仔细阅读原文，提取最重要的信息：
+- 核心话题或论点是什么？
+- 有哪些关键引语、数据或数字？
+- 主要结论是什么？
+- 对读者最重要的收获是什么？
 
-# 翻译风格与要求
-1. 准确性：忠实于原文意义，不歪曲、不遗漏关键信息
-2. 流畅性：译文清晰易懂，逻辑连贯，符合现代简体中文的表达习惯
-3. 简洁与优雅：
-* **主动拆分长句**：当英文原句较长时，应主动将其拆分为多个更短、更简洁的中文句子。
-* **优化语序**：采用地道的中文语序和表达方式。
-* **精炼用词**：选择精准、简洁的词汇。
-* **避免"翻译腔"**：特别注意避免直接套用英文的句式结构
+## Task 2: 翻译与摘要
+将提取的要点翻译为简体中文，并遵循以下要求：
+1. 输出 300-600 字符的中文摘要
+2. 使用 Markdown 格式，文章标题用二级标题（##）
+3. 标题下方注明原文链接
+4. 准确性：忠实于原文，保留关键引语和数据
+5. 流畅性：自然现代的中文，避免翻译腔
+6. 简洁性：拆分长句，用词精准
+7. 至少包含一句原文中的精彩引语
 
-# 注意事项
-1. 直接输出，不要加入任何与原始内容无关的回应性语句"""
+## 输出格式
+直接输出中文摘要，无需任何引导性语句。"""
 
-def translate_with_kimi(content):
-    """使用 Kimi K2.5 API (NVIDIA endpoint) 翻译内容"""
+
+def kimi_translate(content):
+    """Primary: summarize + translate via Kimi LLM."""
     if not KIMI_API_KEY:
-        logging.error("未设置 kimi_API_KEY 环境变量")
-        sys.exit(1)
-    
+        logging.error("kimi_API_KEY not set")
+        return None
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {KIMI_API_KEY}"
     }
-    
-    data = {
+    payload = {
         "model": KIMI_MODEL,
         "messages": [
-            {"role": "system", "content": TRANSLATION_PROMPT},
-            {"role": "user", "content": content}
+            {"role": "system", "content": PROMPT},
+            {"role": "user",   "content": content}
         ],
         "temperature": 0.7,
-        "max_tokens": 16000
+        "max_tokens": 2000
     }
-    
-    max_retries = 5
-    
-    for attempt in range(max_retries):
+
+    for attempt in range(5):
         try:
-            logging.info(f"发送翻译请求 (尝试 {attempt + 1}/{max_retries})...")
-            response = requests.post(
+            logging.info(f"[KIMI] Submitting (attempt {attempt + 1}/5)...")
+            resp = requests.post(
                 KIMI_API_URL,
                 headers=headers,
-                json=data,
+                json=payload,
                 timeout=300
             )
-            response.raise_for_status()
-            result = response.json()
-            
-            if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"]
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("choices") and result["choices"][0]:
+                text = result["choices"][0]["message"]["content"]
+                logging.info(f"[KIMI] OK: {len(text)} chars")
+                return text
             else:
-                logging.error(f"API 响应异常: {result}")
-                if attempt < max_retries - 1:
-                    wait = 30 * (2 ** attempt)
-                    logging.info(f"等待 {wait} 秒后重试...")
-                    time.sleep(wait)
-                    
-        except requests.exceptions.Timeout:
-            logging.error(f"API 请求超时 (尝试 {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                wait = 30 * (2 ** attempt)
-                logging.info(f"等待 {wait} 秒后重试...")
-                time.sleep(wait)
-                
-        except requests.exceptions.RequestException as e:
-            logging.error(f"API 请求失败: {e}")
-            if attempt < max_retries - 1:
-                wait = 30 * (2 ** attempt)
-                logging.info(f"等待 {wait} 秒后重试...")
-                time.sleep(wait)
-                
+                logging.error(f"[KIMI] Unexpected: {result}")
+            if attempt < 4:
+                time.sleep(30 * (2 ** attempt))
         except Exception as e:
-            logging.error(f"未知错误: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(30)
-                
+            logging.error(f"[KIMI] Failed: {e}")
+            if attempt < 4:
+                time.sleep(30 * (2 ** attempt))
     return None
 
-def translate_file(input_file_path):
-    """翻译指定的 .md 文件并保存结果"""
-    if not os.path.exists(input_file_path):
-        logging.error(f"文件不存在: {input_file_path}")
-        return False
-    
-    # 确保输出目录存在
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # 从输入文件名获取输出文件名
-    filename = os.path.basename(input_file_path)
-    output_file_path = os.path.join(OUTPUT_DIR, filename)
-    
-    logging.info(f"开始翻译文件: {input_file_path}")
-    
-    try:
-        with open(input_file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        logging.info(f"内容长度: {len(content)} 字符")
-        translated_content = translate_with_kimi(content)
-        
-        if translated_content:
-            with open(output_file_path, 'w', encoding='utf-8') as f:
-                f.write(translated_content)
-            logging.info(f"翻译完成，已保存到: {output_file_path}")
-            return True
+
+def baidu_fallback(text):
+    """Fallback: translate via Baidu AI Translation (Bearer Token auth)."""
+    if not BAIDU_API_KEY:
+        logging.error("[BAIDU] Missing BAIDU_API_KEY env var")
+        return None
+
+    # Strip markdown headings for cleaner translation
+    lines = text.split("\n")
+    title_line = ""
+    body_lines = []
+    for line in lines:
+        if line.startswith("## "):
+            title_line = line
         else:
-            logging.error(f"翻译失败: {input_file_path}")
-            return False
-    except Exception as e:
-        logging.error(f"处理文件时发生错误: {e}")
-        return False
+            body_lines.append(line)
+    body = "\n".join(body_lines)
+
+    # Truncate to 2800 chars
+    body = body[:2800]
+
+    endpoint = "https://fanyi-api.baidu.com/ait/api/aiTextTranslate"
+    for attempt in range(3):
+        try:
+            logging.info(f"[BAIDU] Translating (attempt {attempt + 1}/3)...")
+            resp = requests.post(
+                endpoint,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {BAIDU_API_KEY}"
+                },
+                json={"q": body, "from": "en", "to": "zh"},
+                timeout=30
+            )
+            data = resp.json()
+            if data.get("error_code"):
+                logging.error(f"[BAIDU] API error: {data.get('error_code')} - {data.get('error_msg', '')}")
+                if attempt < 2:
+                    time.sleep(5)
+                continue
+            if "data" in data and data["data"]:
+                result = data["data"].get("trans_result", "")
+                if result:
+                    logging.info(f"[BAIDU] OK: {len(result)} chars")
+                    final = (title_line + "\n\n" + result) if title_line else result
+                    return final
+            logging.error(f"[BAIDU] Unexpected response: {data}")
+            return None
+        except Exception as e:
+            logging.error(f"[BAIDU] Request failed: {e}")
+            if attempt < 2:
+                time.sleep(5)
+    return None
+
+
+def translate_article(filepath):
+    """翻译单篇文章"""
+    if not os.path.exists(filepath):
+        logging.error(f"File not found: {filepath}")
+        return None
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    outpath = os.path.join(OUTPUT_DIR, os.path.basename(filepath))
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    logging.info(f"Translating: {filepath} ({len(content)} chars)")
+
+    # Step 1: Try Kimi
+    result = kimi_translate(content)
+
+    if result is None:
+        # Step 2: Baidu fallback
+        logging.warning("[FALLBACK] Kimi failed — using Baidu translation...")
+        result = baidu_fallback(content)
+        if result is None:
+            logging.error("[FALLBACK] Baidu also failed — skipped")
+            return None
+
+    with open(outpath, "w", encoding="utf-8") as f:
+        f.write(result)
+    logging.info(f"Done: {outpath} ({len(result)} chars)")
+    return result
+
 
 def main():
-    """主函数"""
-    if len(sys.argv) > 1:
-        # 支持完整路径，如 "dailynews/20260330.md" 或 "20260330.md"
-        input_file = sys.argv[1]
-        if not input_file.endswith('.md'):
-            input_file += '.md'
-        
-        # 如果包含路径分隔符，直接使用
-        if os.path.sep in input_file or '/' in input_file or '\\' in input_file:
-            input_file_path = input_file
-        else:
-            input_file_path = os.path.join(INPUT_DIR, input_file)
+    """处理所有今日未翻译的文章"""
+    md_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.md")),
+                      key=os.path.getmtime, reverse=True)
+    if not md_files:
+        logging.error("No .md files found in " + INPUT_DIR)
+        return
+
+    # 找最新日期的文件
+    latest = md_files[0]
+    logging.info(f"Processing: {latest}")
+
+    ok = translate_article(latest)
+    if ok:
+        logging.info("Translation done")
     else:
-        # 否则找最新的文件
-        md_files = glob.glob(os.path.join(INPUT_DIR, "*.md"))
-        if not md_files:
-            logging.error("找不到任何 .md 文件")
-            sys.exit(1)
-        input_file_path = max(md_files, key=os.path.getmtime)
-    
-    if not os.path.exists(input_file_path):
-        logging.error(f"找不到要翻译的文件: {input_file_path}")
+        logging.error("Translation failed")
         sys.exit(1)
-    
-    success = translate_file(input_file_path)
-    
-    if success:
-        logging.info("翻译任务完成")
-    else:
-        logging.error("翻译任务失败")
-        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
