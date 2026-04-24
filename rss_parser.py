@@ -2,6 +2,7 @@
 POLITICO EU RSS Parser
 抓取 https://www.politico.eu/feed/ 并按日期保存为 Markdown。
 支持 backfill 模式（忽略 sent 状态）用于补发旧文章。
+新特性：当日无文章时，自动回退到历史未处理文章。
 """
 import feedparser
 import html2text
@@ -36,7 +37,7 @@ def fetch_rss(force_backfill=False):
     """
     抓取 EU Politico RSS。
     force_backfill=True: 忽略 sent 状态，抓取最近 N 天的文章（用于补发）。
-    正常模式：只抓今天 + 未发送的文章。
+    正常模式：优先今日文章，无则回退到历史未处理文章。
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     processed = load_processed()
@@ -51,96 +52,21 @@ def fetch_rss(force_backfill=False):
     today_str = now_eu.strftime("%Y-%m-%d")
     today_file = os.path.join(OUTPUT_DIR, today_str + ".md")
 
-    if not force_backfill:
-        # 正常模式：只抓今天 + 未处理
-        candidates = []
-        for entry in feed.entries:
-            link = entry.get("link", "")
-            title = entry.get("title", "无标题")
-            if not link or link in processed:
-                continue
-
-            pub_dt = None
-            try:
-                pub_struct = entry.get("published_parsed")
-                if pub_struct:
-                    pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc)
-            except Exception:
-                pass
-
-            if pub_dt:
-                eu_tz = pytz.timezone("Europe/Brussels")
-                eu_dt = pub_dt.astimezone(eu_tz)
-                if eu_dt.strftime("%Y-%m-%d") != today_str:
-                    continue
-            else:
-                continue
-
-            candidates.append(entry)
-
-        print(f"今日（欧洲时间 {today_str}）新文章: {len(candidates)} 篇")
-        if not candidates:
-            print("今日无新文章，跳过写入")
-            return []
-
-        selected = candidates[:MAX_DAILY]
-    else:
-        # backfill 模式：忽略 sent，抓最近 N 天的文章
-        backfill_days = int(os.getenv("BACKFILL_DAYS", "4"))
-        print(f"Backfill 模式: 最近 {backfill_days} 天")
-        cutoff = now_eu - timedelta(days=backfill_days)
-        candidates = []
-        for entry in feed.entries:
-            link = entry.get("link", "")
-            if not link:
-                continue
-
-            pub_dt = None
-            try:
-                pub_struct = entry.get("published_parsed")
-                if pub_struct:
-                    pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc)
-            except Exception:
-                pass
-
-            if pub_dt:
-                eu_tz = pytz.timezone("Europe/Brussels")
-                eu_dt = pub_dt.astimezone(eu_tz)
-                if eu_dt < cutoff:
-                    continue
-            candidates.append(entry)
-
-        print(f"Backfill 候选: {len(candidates)} 篇")
-        # 跳过已完整发送过的
-        selected = []
-        for entry in candidates:
-            link = entry.get("link", "")
-            if link in processed and processed[link].get("sent"):
-                continue
-            selected.append(entry)
-        selected = selected[:MAX_DAILY]
-
-    print(f"选取 {len(selected)} 篇")
-
-    html_converter = html2text.HTML2Text()
-    html_converter.body_width = 0
-
-    saved = []
-    for entry in selected:
-        title = entry.get("title", "无标题")
+    # 解析所有文章
+    all_articles = []
+    for entry in feed.entries:
         link = entry.get("link", "")
-        content_html = ""
-        if hasattr(entry, "content") and entry.content:
-            content_html = entry.content[0].get("value", "")
-        if not content_html and hasattr(entry, "summary"):
-            content_html = entry.summary
-        content_md = html_converter.handle(content_html).strip() if content_html else "（无正文）"
-
-        item = f"## {title}\n\n链接：{link}\n\n{content_md}\n\n---\n\n"
-        mode = "a" if os.path.exists(today_file) else "w"
-        with open(today_file, mode, encoding="utf-8") as f:
-            f.write(item)
-
+        if not link:
+            continue
+        
+        pub_dt = None
+        try:
+            pub_struct = entry.get("published_parsed")
+            if pub_struct:
+                pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc)
+        except Exception:
+            pass
+        
         pub_str = today_str
         if pub_dt:
             try:
@@ -148,8 +74,82 @@ def fetch_rss(force_backfill=False):
                 pub_str = pub_dt.astimezone(eu_tz).strftime("%Y-%m-%d")
             except Exception:
                 pass
+        
+        all_articles.append({
+            "entry": entry,
+            "link": link,
+            "pub_dt": pub_dt,
+            "pub_str": pub_str,
+            "is_today": pub_str == today_str if pub_dt else False
+        })
 
-        processed[link] = {"title": title, "sent": False, "date": pub_str}
+    print(f"RSS 共 {len(all_articles)} 篇文章")
+
+    if force_backfill:
+        # backfill 模式：忽略 sent，抓最近 N 天的文章
+        backfill_days = int(os.getenv("BACKFILL_DAYS", "4"))
+        print(f"Backfill 模式: 最近 {backfill_days} 天")
+        cutoff = now_eu - timedelta(days=backfill_days)
+        
+        candidates = []
+        for item in all_articles:
+            if item["pub_dt"]:
+                eu_tz = pytz.timezone("Europe/Brussels")
+                eu_dt = item["pub_dt"].astimezone(eu_tz)
+                if eu_dt < cutoff:
+                    continue
+            candidates.append(item)
+        
+        print(f"Backfill 候选: {len(candidates)} 篇")
+        # 跳过已完整发送过的
+        selected = []
+        for item in candidates:
+            link = item["link"]
+            if link in processed and processed[link].get("sent"):
+                continue
+            selected.append(item)
+        selected = selected[:MAX_DAILY]
+    else:
+        # 正常模式：优先今日文章，无则回退到历史未处理
+        today_articles = [a for a in all_articles if a["is_today"] and a["link"] not in processed]
+        print(f"今日（欧洲时间 {today_str}）新文章: {len(today_articles)} 篇")
+        
+        if today_articles:
+            selected = today_articles[:MAX_DAILY]
+            print(f"→ 使用今日文章: {len(selected)} 篇")
+        else:
+            # 回退到历史未处理文章
+            historical = [a for a in all_articles if a["link"] not in processed]
+            print(f"→ 今日无文章，回退到历史未处理: {len(historical)} 篇")
+            selected = historical[:MAX_DAILY]
+
+    if not selected:
+        print("无新文章，跳过写入")
+        return []
+
+    print(f"选取 {len(selected)} 篇")
+
+    html_converter = html2text.HTML2Text()
+    html_converter.body_width = 0
+
+    saved = []
+    for item in selected:
+        entry = item["entry"]
+        title = entry.get("title", "无标题")
+        link = item["link"]
+        content_html = ""
+        if hasattr(entry, "content") and entry.content:
+            content_html = entry.content[0].get("value", "")
+        if not content_html and hasattr(entry, "summary"):
+            content_html = entry.summary
+        content_md = html_converter.handle(content_html).strip() if content_html else "（无正文）"
+
+        item_text = f"## {title}\n\n链接：{link}\n\n{content_md}\n\n---\n\n"
+        mode = "a" if os.path.exists(today_file) else "w"
+        with open(today_file, mode, encoding="utf-8") as f:
+            f.write(item_text)
+
+        processed[link] = {"title": title, "sent": False, "date": item["pub_str"]}
         saved.append(link)
         print(f"  已保存: {title[:60]}")
 
